@@ -1,0 +1,8 @@
+{
+  "name": "taskview",
+  "owner": {
+    "name": "Stefan Hoevelmanns"
+  },
+  "description": "taskview: the session's live task list, distilled from the user's requests, drawn above the prompt",
+  "plugins": [{ "name": "taskview", "source": "./" }]
+}
