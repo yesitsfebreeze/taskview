@@ -10,10 +10,15 @@ a new one fits.
 
 ## How it behaves
 
-- **Automatic creation.** The user sends a prompt describing work; the model
-  breaks it into up to 5 tasks through the task tool and starts. Follow-up
-  prompts refine the same session: tasks can be added, progressed, completed,
-  replaced or removed at any time.
+- **Automatic creation — enforced.** The user sends a prompt describing work;
+  the model breaks it into up to 5 tasks through the task tool and starts. Two
+  mechanisms make this reliable, not hoped-for: an imperative reminder rides
+  every prompt ("you MUST first break the work into tasks… BEFORE starting the
+  work; skip for questions that change nothing"), and a **gate** refuses the
+  first file-changing call (`Write`/`Edit` — `write`/`edit` in pi) with
+  instructions while the list is empty, so the work cannot start untracked.
+  Follow-up prompts refine the same session: tasks can be added, progressed,
+  completed, replaced or removed at any time. Pure questions create no tasks.
 - **The view.** One band above the prompt: a header (`2/5 · 1 done`), one row
   per task — `✓` done, `▶` active, `○` todo — and a progress bar (the percent
   centred in it) beside each task.
