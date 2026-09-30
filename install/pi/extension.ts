@@ -233,12 +233,23 @@ export default function taskviewExtension(pi: ExtensionAPI) {
 		draw(ctx);
 	});
 
+	// The teeth: with an empty task list, the first file-changing call is
+	// refused until the work is on the list — the guideline steers, this makes
+	// the automatic creation reliable. Read-only work and questions pass.
+	const GATE = `taskview: the task list is empty. First break this work into up to ${CAPACITY} tasks with the task tool — one call with action "add" per task, short titles — then retry this call. Read-only work and pure questions need no tasks.`
+	pi.on("tool_call", async (event) => {
+		if (event.toolName !== "write" && event.toolName !== "edit") return;
+		if ("parentToolCallId" in event && event.parentToolCallId) return; // nested calls: not this loop's turn to gate
+		if (state.tasks.length) return;
+		return { block: true, reason: GATE };
+	});
+
 	// The automatic half: a standing instruction, in the prompt, that the model
 	// distils every request into tasks and keeps the view current on its own.
 	pi.on("before_agent_start", (event) => {
 		event.systemPromptOptions.promptGuidelines = [
 			...(event.systemPromptOptions.promptGuidelines ?? []),
-			`Task view: the task tool maintains a live task list drawn above the editor. When the user's request describes concrete work, automatically distil it into up to ${CAPACITY} tasks — call task with action "add" once per task, no need to ask.`,
+			`Task view: the task tool maintains a live task list drawn above the editor. When the user's request involves creating, changing or fixing anything, you MUST first break the work into up to ${CAPACITY} tasks with the task tool — one call with action "add" per task — BEFORE starting the work. For a question or chat that produces no files or changes, skip task creation.`,
 			`Keep the task view current while you work: action "progress" (id, progress 0-100) as steps finish, action "complete" when a task is done, action "active" for the one you are starting.`,
 			`The task view holds at most ${CAPACITY} tasks. When it is full, tell the user an old task must make room and use action "replace" (id of the old task, new title) or remove/complete one before adding another.`,
 		];

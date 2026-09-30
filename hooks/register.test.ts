@@ -70,8 +70,8 @@ test("rows: header, marker and bar beside each task, full warning at capacity", 
 })
 
 test("reminder: distil-when-empty, keep-current-when-set, loud when full", () => {
-  expect(reminder(S([]))).toContain("distill it into up to 5 tasks now")
-  expect(reminder(S([]))).toContain(TOOL)
+  expect(reminder(S([]))).toContain("you MUST first break the work into up to 5 tasks")
+  expect(reminder(S([]))).toContain("For a question or chat that produces no files or changes, skip task creation")
   const set = reminder(S([{ id: 1, title: "write tests", progress: 60, status: "active" }]))
   expect(set).toContain('Tasks 1/5: #1 "write tests" 60% active')
   const full = reminder(
@@ -80,8 +80,16 @@ test("reminder: distil-when-empty, keep-current-when-set, loud when full", () =>
   expect(full).toContain("FULL (5/5)")
 })
 
-// The whole loop, through the harness: the tool drives the state, the band
-// above the prompt draws it, every prompt carries the reminder.
+test("the gate: an empty list refuses the first Write, a task list lets it pass", async ($, on) => {
+  on("ui.render", async () => null as any)
+  on("prompt.submit", async (_: any, e: any) => ({ ...e }))
+  const denied = (await $.tool.call({ tool: "Write", file_path: "/tmp/x", content: "x" } as any)) as any
+  expect(denied.deny).toContain("task list is empty")
+  await $.tool.call({ tool: TOOL, action: "add", title: "the work" } as any)
+  const reminderNow = await $.prompt.submit({ text: "go on" } as any)
+  expect((reminderNow as any).context?.[0]).toContain('Tasks 1/5: #1 "the work" 0%')
+})
+
 test("the tool fills the view, the sixth warns, the band and the reminder follow", async ($, on) => {
   on("ui.render", async () => null as any)
   on("prompt.submit", async (_: any, e: any) => ({ ...e }))

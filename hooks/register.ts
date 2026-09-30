@@ -150,7 +150,7 @@ export function rows(s: TaskviewState, columns: number): Seg[][] {
 /** What the model reads beside every prompt so the view stays current. */
 export function reminder(s: TaskviewState): string {
   if (!s.tasks.length)
-    return `[taskview] No tasks yet. If the user's request describes concrete work, distill it into up to ${CAPACITY} tasks now — one ${TOOL} call per task with {action:"add",title}, no need to ask. Then keep progress current as you work.`
+    return `[taskview] No tasks yet. If this request involves creating, changing or fixing anything, you MUST first break the work into up to ${CAPACITY} tasks with ${TOOL} — one {action:"add", title:"…"} call per task — BEFORE starting the work; then report progress (action "progress", id, progress 0-100) as you go and complete each task when done. For a question or chat that produces no files or changes, skip task creation.`
   const list = s.tasks
     .map((t) => `#${t.id} "${t.title}" ${t.status === "done" ? "done" : `${t.progress}%${t.status === "active" ? " active" : ""}`}`)
     .join("; ")
@@ -197,6 +197,17 @@ export const register: Register = (on) => {
     if (warn) return { deny: text }
     return { result: text }
   })
+
+  // The teeth: with an empty task list, the first file-changing call is
+  // refused until the work is on the list — the reminder steers, this makes
+  // the automatic creation reliable. Read-only work and questions pass.
+  const GATE = `taskview: the task list is empty. First break this work into up to ${CAPACITY} tasks with ${TOOL} — one {action:"add", title:"…"} call per task, short titles — then retry this call. Read-only work and pure questions need no tasks.`
+  for (const tool of ["Write", "Edit", "MultiEdit"])
+    on("tool.call", { tool }, async ($, e, next) => {
+      const s = (await $.state.get(STATE)).value ?? EMPTY
+      if (s.tasks.length) return next(e)
+      return { deny: GATE }
+    })
 
   // The automatic half: every prompt carries the view, so the model creates
   // tasks from what the user asks for and keeps them current, unprompted.
