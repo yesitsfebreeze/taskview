@@ -94,7 +94,7 @@ test("the tool fills the view, the sixth warns, the band and the reminder follow
   expect(JSON.stringify(empty)).toContain("No tasks yet")
 
   const first = (await $.tool.call({ tool: TOOL, action: "add", title: "fix the parser" } as any)) as any
-  expect(first.result?.content?.[0]?.text).toContain('Added #1 "fix the parser" (1/5)')
+  expect(first.result).toContain('Added #1 "fix the parser" (1/5)')
   await $.tool.call({ tool: TOOL, action: "add", title: "read the docs" } as any)
   await $.tool.call({ tool: TOOL, action: "progress", id: 1, progress: 45 } as any)
 
@@ -109,7 +109,6 @@ test("the tool fills the view, the sixth warns, the band and the reminder follow
 
   for (let i = 0; i < 3; i++) await $.tool.call({ tool: TOOL, action: "add", title: `filler ${i}` } as any)
   const sixth = (await $.tool.call({ tool: TOOL, action: "add", title: "one too many" } as any)) as any
-  expect(sixth.result?.isError).toBe(true)
-  expect(sixth.result?.content?.[0]?.text).toContain("full")
+  expect(sixth.deny).toContain("full")
   expect(await band()).toContain("⚠ full — replace a task to add another")
 })

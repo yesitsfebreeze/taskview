@@ -187,15 +187,15 @@ export const register: Register = (on) => {
       .then(() => next(e)),
   )
 
-  // Serve it: apply, persist, answer. `warn` answers as an error result so the
-  // capacity refusal is loud — the model then warns the user.
+  // Serve it: apply, persist, answer. The engine's mapper takes a string as
+  // the result; `warn` answers as `deny` so the refusal reaches the model as an
+  // error result — it then warns the user.
   on("tool.call", { tool: TOOL }, async ($, e: any, next) => {
     const s = (await $.state.get(STATE)).value ?? EMPTY
     const { state, text, warn } = apply(s, e as TaskInput)
     if (state !== s) await $.state.set(STATE, state)
-    return {
-      result: { content: [{ type: "text", text }], isError: warn === true },
-    }
+    if (warn) return { deny: text }
+    return { result: text }
   })
 
   // The automatic half: every prompt carries the view, so the model creates
