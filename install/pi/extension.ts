@@ -4,25 +4,45 @@
  * The Claude Code twin is the repo's `hooks/register.ts`; this is the pi port,
  * one file so it installs standalone as `~/.pi/agent/extensions/taskview.ts`.
  *
- * - Registers a `task` tool: the model distils the user's requests into up to
- *   5 tasks on its own (the before_agent_start guideline below tells it to),
+ * - Registers a `task` tool: the model distils the user's requests into
+ *   tasks on its own (the before_agent_start guideline below tells it to),
  *   keeps progress current while it works, and works tasks to completion.
- * - Draws the list as a widget above the editor: one row per task, a progress
- *   bar beside each, the count in a header, and a loud warning when full.
- * - At 5/5 an add is refused with an error result and a notification, so the
- *   user is told an old task has to be replaced (action "replace") first.
+ * - Draws the list as a widget above the editor: one row per task, the
+ *   progress bar in front of each, the done count in a header. There is no
+ *   task limit.
+ * - Pins the overall progress in the footer status: a bar and `40% of 15`.
+ * - The finish signal: a settled stop with open tasks never rests — no
+ *   finish reason (no **Done.** / **Partially done.** / **Failed.** status
+ *   line) resumes the run after a minute of stop time; a finish reason with
+ *   open tasks steers the run to either ask the user (the ask tool opens the
+ *   answer box) or keep working. Aborted runs and unchanged-task stalls stop
+ *   the signal: the first is the user's explicit stop, the second needs them.
  *
  * State follows the branch: the whole task list rides in every tool result's
  * `details` and is reconstructed from the branch on session_start/session_tree.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, type AssistantMessage, type TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 
-/** The view holds at most this many tasks; the next add must replace one. */
-const CAPACITY = 5;
+// ── the finish signal ──────────────────────────────────────────────────────
+// A stop with open tasks in the view is not finished work, so the session
+// never rests on it: a stop without a finish reason (the **Done.** /
+// **Partially done.** / **Failed.** status line of the task report) resumes the
+// run after RESUME_DELAY_MS of stop time; a finish reason with open tasks
+// steers the run to decide — ask the user (the ask tool opens the answer box)
+// or keep going. Nothing continues when the user aborted the run, and
+// nothing continues when no open task changed across MAX_STALLS consecutive
+// automatic continues — a stall that deep needs the user, not another restart.
+
+/** Stop time before a finish-reason-less stop resumes on its own. */
+const RESUME_DELAY_MS = 60_000;
+/** Consecutive automatic continues with unchanged open tasks before we give up. */
+const MAX_STALLS = 3;
+/** The status line of a finished task report (APPEND_SYSTEM.md's contract). */
+const FINISH_REASON_RE = /\*\*(?:Done|Partially done|Failed)\.\*\*/;
 
 type Task = { id: number; title: string; progress: number; status: "todo" | "active" | "done" };
 type TaskState = { tasks: Task[]; nextId: number };
@@ -50,8 +70,7 @@ const TaskParams = Type.Object({
 
 /**
  * The pure reducer every action goes through: the next state plus the text the
- * model reads. `warn` is the capacity refusal — the add was NOT made and the
- * model must tell the user an old task has to make room.
+ * model reads. `warn` names a refused action — the state is unchanged.
  */
 function apply(s: TaskState, i: Static<typeof TaskParams>): { state: TaskState; text: string; warn?: string } {
 	const tasks = s.tasks.map((t) => ({ ...t }));
@@ -60,15 +79,9 @@ function apply(s: TaskState, i: Static<typeof TaskParams>): { state: TaskState; 
 		case "add": {
 			const title = (i.title ?? "").trim();
 			if (!title) return { state: s, text: "add needs a title", warn: "title required" };
-			if (tasks.length >= CAPACITY)
-				return {
-					state: s,
-					warn: "full",
-					text: `WARNING: the task view is full (${CAPACITY}/${CAPACITY}) — "${title}" was NOT added. Tell the user the list is full and an old task must make room: either call action "replace" with the id of the task to retire, or complete/remove one first.`,
-				};
 			const t: Task = { id: s.nextId, title, progress: 0, status: "todo" };
 			tasks.push(t);
-			return { state: { tasks, nextId: s.nextId + 1 }, text: `Added #${t.id} "${title}" (${tasks.length}/${CAPACITY})` };
+			return { state: { tasks, nextId: s.nextId + 1 }, text: `Added #${t.id} "${title}" (${tasks.length} tasks)` };
 		}
 		case "progress": {
 			const t = one(i.id);
@@ -116,7 +129,7 @@ function apply(s: TaskState, i: Static<typeof TaskParams>): { state: TaskState; 
 			tasks[tasks.findIndex((x) => x.id === t.id)] = fresh;
 			return {
 				state: { tasks, nextId: s.nextId + 1 },
-				text: `Replaced #${t.id} "${t.title}" with #${fresh.id} "${title}" (${tasks.length}/${CAPACITY})`,
+				text: `Replaced #${t.id} "${t.title}" with #${fresh.id} "${title}" (${tasks.length} tasks)`,
 			};
 		}
 		case "clear":
@@ -126,7 +139,7 @@ function apply(s: TaskState, i: Static<typeof TaskParams>): { state: TaskState; 
 			return {
 				state: s,
 				text: s.tasks.length
-					? `${s.tasks.length}/${CAPACITY}: ` +
+					? `${s.tasks.length} tasks, ${overall(s)}% overall: ` +
 						s.tasks
 							.map((t) => `#${t.id} "${t.title}" ${t.status === "done" ? "done" : `${t.progress}%`}`)
 							.join(" · ")
@@ -135,14 +148,20 @@ function apply(s: TaskState, i: Static<typeof TaskParams>): { state: TaskState; 
 	}
 }
 
+/** Overall progress: the mean over all tasks, a done task counting 100. */
+const overall = (s: TaskState): number =>
+	s.tasks.length
+		? clamp(s.tasks.reduce((n, t) => n + (t.status === "done" ? 100 : clamp(t.progress)), 0) / s.tasks.length)
+		: 0;
+
 const summary = (s: TaskState) =>
 	s.tasks.length
-		? `${s.tasks.length}/${CAPACITY}: ` +
+		? `${s.tasks.length} tasks, ${overall(s)}% overall: ` +
 			s.tasks.map((t) => `#${t.id} ${t.title} (${t.status === "done" ? "done" : `${t.progress}%`})`).join(" · ")
 		: "no tasks";
 
 /**
- * The widget: one row per task with a progress bar beside it, re-rendered from
+ * The widget: one row per task with the progress bar in front of it, re-rendered from
  * live state so a task update is a `setWidget` call away. The theme is the one
  * the factory got; every state change re-registers with the current one.
  */
@@ -168,10 +187,7 @@ class TaskViewWidget {
 		}
 		const done = s.tasks.filter((t) => t.status === "done").length;
 		const lines: string[] = [];
-		let header = th.fg("dim", " tasks ") + th.fg(s.tasks.length >= CAPACITY ? "warning" : "muted", `${s.tasks.length}/${CAPACITY}`);
-		if (done) header += th.fg("dim", ` · ${done} done`);
-		if (s.tasks.length >= CAPACITY) header += th.fg("warning", " ⚠ full — replace a task to add another");
-		lines.push(truncateToWidth(header, width));
+		lines.push(truncateToWidth(th.fg("dim", ` tasks ${done}/${s.tasks.length} done`), width));
 
 		for (const t of s.tasks) {
 			const mark =
@@ -188,8 +204,9 @@ class TaskViewWidget {
 					: th.fg(t.status === "active" ? "success" : "dim", "█".repeat(filled)) +
 						th.fg("dim", "░".repeat(12 - filled))) +
 				th.fg("dim", "] ") +
-				(t.status === "done" ? th.fg("success", "done") : th.fg("muted", `${clamp(t.progress)}%`));
-			lines.push(truncateToWidth(` ${mark}${th.fg("dim", `#${t.id} `)}${styledTitle} ${bar}`, width));
+				// Padded to 4 cells so the ids and titles behind it form one column.
+				(t.status === "done" ? th.fg("success", "done") : th.fg("muted", `${clamp(t.progress)}%`.padStart(4)));
+			lines.push(truncateToWidth(` ${mark}${bar} ${th.fg("dim", `#${t.id} `)}${styledTitle}`, width));
 		}
 
 		this.cachedWidth = width;
@@ -207,6 +224,35 @@ export default function taskviewExtension(pi: ExtensionAPI) {
 	// In-memory state, reconstructed from the branch's tool results.
 	let state: TaskState = EMPTY;
 
+	// Finish-signal runtime: the pending resume timer and the stall bookkeeping.
+	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+	let lastOpenSig = "";
+	let stalls = 0;
+
+	const clearResumeTimer = (): void => {
+		if (resumeTimer) {
+			clearTimeout(resumeTimer);
+			resumeTimer = undefined;
+		}
+	};
+
+	/** The last assistant message on the branch, or undefined when there is none. */
+	const lastAssistant = (ctx: ExtensionContext): AssistantMessage | undefined => {
+		const branch = ctx.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "message") continue;
+			if (entry.message.role === "assistant") return entry.message;
+		}
+		return undefined;
+	};
+
+	const assistantText = (msg: AssistantMessage): string =>
+		msg.content
+			.filter((c): c is TextContent => c.type === "text")
+			.map((c) => c.text)
+			.join("\n");
+
 	const reconstructState = (ctx: ExtensionContext) => {
 		state = EMPTY;
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -218,25 +264,107 @@ export default function taskviewExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	/** Redraw the widget above the editor; a no-op without a UI. */
+	/** Redraw the widget above the editor and the footer status; a no-op without a UI. */
 	const draw = (ctx: ExtensionContext) => {
 		if (!ctx.hasUI) return;
+		const n = Math.round(overall(state) / 10);
+		ctx.ui.setStatus(
+			"taskview",
+			state.tasks.length ? `${"█".repeat(n)}${"░".repeat(10 - n)} ${overall(state)}% of ${state.tasks.length}` : undefined,
+		);
 		ctx.ui.setWidget("taskview", (tui, theme) => new TaskViewWidget(theme, state));
 	};
 
+	const openList = (): { id: number; title: string; progress: number }[] =>
+		state.tasks.filter((t) => t.status !== "done").map((t) => ({ id: t.id, title: t.title, progress: t.progress }));
+
+	const openTaskLines = (open: { id: number; title: string; progress: number }[]): string =>
+		open.map((t) => `  - #${t.id} "${t.title}" (${clamp(t.progress)}%)`).join("\n");
+
+	const finishSignal = (ctx: ExtensionContext): void => {
+		clearResumeTimer();
+		// Interactive only: print mode has no idle period to resume from.
+		if (!ctx.hasUI) return;
+		const msg = lastAssistant(ctx);
+		if (!msg) return;
+		// An explicit stop (esc) or a dead provider outranks the signal — never
+		// restart what the user cancelled or what keeps erroring.
+		if (msg.stopReason === "aborted" || msg.stopReason === "error") return;
+
+		const open = openList();
+		if (!open.length) {
+			stalls = 0;
+			lastOpenSig = "";
+			return;
+		}
+
+		const sig = JSON.stringify(open);
+		if (sig === lastOpenSig) stalls++;
+		else {
+			stalls = 0;
+			lastOpenSig = sig;
+		}
+		if (stalls >= MAX_STALLS) {
+			ctx.ui.notify(
+				`taskview: ${open.length} open task(s) unchanged after ${MAX_STALLS} automatic continues — needs your input`,
+				"warning",
+			);
+			return;
+		}
+
+		const list = openTaskLines(open);
+		if (FINISH_REASON_RE.test(assistantText(msg))) {
+			// A finish reason with open tasks: evaluate whether user input is
+			// needed. If yes the ask tool opens the answer box; if no, continue.
+			void pi.sendUserMessage(
+				`taskview: you reported a finish reason, but ${open.length} task(s) are still open:\n${list}\n` +
+					`Decide whether you need user input to proceed. If you do, ask the user now with the ask tool — one question stating exactly what you need — and act on the answer. ` +
+					`If you do not, continue working the open tasks to completion, keeping the task view current (action "progress" / "complete").`,
+				{ deliverAs: "followUp" },
+			);
+			return;
+		}
+
+		// No finish reason: resume the run after the stop has sat idle a minute.
+		resumeTimer = setTimeout(() => {
+			resumeTimer = undefined;
+			void pi.sendUserMessage(
+				`taskview: the run stopped without a finish reason, but ${open.length} task(s) are still open:\n${list}\n` +
+					`Continue working them to completion, keeping the task view current (action "progress" / "complete"). ` +
+					`End with the standard task report and its status line (**Done.** / **Partially done.** / **Failed.**).`,
+				{ deliverAs: "followUp" },
+			);
+		}, RESUME_DELAY_MS);
+	};
+
+	const resetFinishSignal = (): void => {
+		clearResumeTimer();
+		lastOpenSig = "";
+		stalls = 0;
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
+		resetFinishSignal();
 		reconstructState(ctx);
 		draw(ctx);
 	});
 	pi.on("session_tree", async (_event, ctx) => {
+		resetFinishSignal();
 		reconstructState(ctx);
 		draw(ctx);
 	});
 
+	// A new run (or shutdown) cancels a pending resume — the user is driving.
+	pi.on("agent_start", () => clearResumeTimer());
+	pi.on("session_shutdown", () => clearResumeTimer());
+
+	// The finish signal: check every settled stop against the task view.
+	pi.on("agent_settled", (_event, ctx) => finishSignal(ctx));
+
 	// The teeth: with an empty task list, the first file-changing call is
 	// refused until the work is on the list — the guideline steers, this makes
 	// the automatic creation reliable. Read-only work and questions pass.
-	const GATE = `taskview: the task list is empty. First break this work into up to ${CAPACITY} tasks with the task tool — one call with action "add" per task, short titles — then retry this call. Read-only work and pure questions need no tasks.`
+	const GATE = `taskview: the task list is empty. First break this work into tasks with the task tool — one call with action "add" per task, short titles — then retry this call. Read-only work and pure questions need no tasks.`
 	pi.on("tool_call", async (event) => {
 		if (event.toolName !== "write" && event.toolName !== "edit") return;
 		if ("parentToolCallId" in event && event.parentToolCallId) return; // nested calls: not this loop's turn to gate
@@ -249,26 +377,21 @@ export default function taskviewExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => {
 		event.systemPromptOptions.promptGuidelines = [
 			...(event.systemPromptOptions.promptGuidelines ?? []),
-			`Task view: the task tool maintains a live task list drawn above the editor. When the user's request involves creating, changing or fixing anything, you MUST first break the work into up to ${CAPACITY} tasks with the task tool — one call with action "add" per task — BEFORE starting the work. For a question or chat that produces no files or changes, skip task creation.`,
+			`Task view: the task tool maintains a live task list drawn above the editor. When the user's request involves creating, changing or fixing anything, you MUST first break the work into tasks with the task tool — one call with action "add" per task — BEFORE starting the work. For a question or chat that produces no files or changes, skip task creation.`,
 			`Keep the task view current while you work: action "progress" (id, progress 0-100) as steps finish, action "complete" when a task is done, action "active" for the one you are starting.`,
-			`The task view holds at most ${CAPACITY} tasks. When it is full, tell the user an old task must make room and use action "replace" (id of the old task, new title) or remove/complete one before adding another.`,
+			`Finish signal: every stop is checked against the task view. End finished work with the status line of the task report (**Done.** / **Partially done.** / **Failed.**). Stopping with open tasks and no status line resumes the run automatically after a minute; a status line with tasks still open makes you either ask the user (ask tool) or continue working.`,
 		];
 	});
 
 	pi.registerTool({
 		name: "task",
 		label: "Task",
-		description: `The session's task view, drawn above the editor. Maintain it automatically: distil the user's request into up to ${CAPACITY} tasks, keep progress current, work tasks to completion.`,
+		description: `The session's task view, drawn above the editor. Maintain it automatically: distil the user's request into tasks, keep progress current, work tasks to completion.`,
 		parameters: TaskParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const { state: next, text, warn } = apply(state, params);
 			if (next !== state) state = next;
-
-			// The capacity refusal reaches the user twice: the error result the
-			// model has to answer for, and the warning next to the full list.
-			if (warn === "full" && ctx.hasUI)
-				ctx.ui.notify(`Task view full (${CAPACITY}/${CAPACITY}) — replace an old task to add another`, "warning");
 
 			draw(ctx);
 			return {
@@ -293,7 +416,7 @@ export default function taskviewExtension(pi: ExtensionAPI) {
 			if (!details) return new Text(body, 0, 0);
 			if (details.warn)
 				return new Text(
-					theme.fg(details.warn === "full" ? "warning" : "error", `⚠ ${body}`),
+					theme.fg("error", `⚠ ${body}`),
 					0,
 					0,
 				);

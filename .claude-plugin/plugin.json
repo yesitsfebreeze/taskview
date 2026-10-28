@@ -1,7 +1,7 @@
 {
   "name": "taskview",
-  "version": "0.1.0",
-  "description": "A task view over the session: the model distills the user's requests into up to 5 tasks on its own, works them to completion with live progress, and the list draws above the prompt with a progress bar beside each task.",
+  "version": "0.2.0",
+  "description": "A task view over the session: the model distills the user's requests into tasks on its own, works them to completion with live progress, and the list draws above the prompt with a progress bar in front of each task and the overall progress in the footer.",
   "author": {
     "name": "Stefan Hoevelmanns"
   },

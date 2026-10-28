@@ -1,0 +1,8 @@
+{
+  "name": "taskview",
+  "version": "0.3.0+codex.1",
+  "description": "Persistent task progress for Codex, with Orly as the completion gate.",
+  "skills": "./install/codex/skills/",
+  "mcpServers": "./install/codex/mcp.json",
+  "hooks": "./install/codex/hooks.json"
+}

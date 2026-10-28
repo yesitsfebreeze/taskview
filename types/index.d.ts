@@ -10,14 +10,22 @@ export type TaskviewTask = {
   status: "todo" | "active" | "done"
 }
 
-/** The whole task view: at most 5 tasks, then one must be replaced. */
+/** The whole task view: any number of tasks. */
 export type TaskviewState = {
   tasks: TaskviewTask[]
   nextId: number
 }
 
+/** The finish signal's bookkeeping at a stop: what it compares the next stop against. */
+export type TaskviewFinish = {
+  /** The open-task signature at the last acted-on stop; `""` when none yet. */
+  lastOpenSig: string
+  /** Consecutive automatic continues with the open tasks unchanged. */
+  stalls: number
+}
+
 declare module "claude-code" {
   interface PluginState {
-    taskview: { state: TaskviewState }
+    taskview: { state: TaskviewState; finish: TaskviewFinish }
   }
 }
